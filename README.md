@@ -46,7 +46,7 @@ void main() {
   // For Flutter, you can use the path_provider package to get a valid device path.
   String basePath = "./zeytin_db";
 
-  zeytin.initialize(basePath);
+  await zeytin.initialize(basePath);
 
   // Your application starts here...
 }
@@ -94,7 +94,7 @@ ZeytinStorage zeytin = ZeytinStorage(
 
 void main() {
   String basePath = "./zeytin_secure_db";
-  zeytin.initialize(basePath);
+  await zeytin.initialize(basePath);
 
   // Your application starts here...
 }
@@ -372,4 +372,5 @@ if (hasToken) {
 // Resetting the system (Completely deletes everything in the Mini box)
 await ZeytinMini.clear();
 ```
+
 # ZeytinLocalStorage

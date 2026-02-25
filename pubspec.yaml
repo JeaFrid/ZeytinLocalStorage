@@ -1,10 +1,12 @@
 name: zeytin_local_storage
 description: Zeytin is a database solution developed with care and love for server and local solutions.
 version: 1.0.0
-repository: https://github.com/my_org/my_repo
+repository: https://github.com/JeaFrid/ZeytinLocalStorage
+homepage: https://github.com/JeaFrid/ZeytinLocalStorage
+issue_tracker: https://github.com/JeaFrid/ZeytinLocalStorage/issues
 
 environment:
-  sdk: ^3.10.8
+  sdk: ^3.0.0
 
 dependencies:
   encrypt: ^5.0.3

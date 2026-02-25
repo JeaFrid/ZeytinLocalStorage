@@ -16,7 +16,7 @@ Future<void> main() async {
   );
 
   print("[*] Initializing Zeytin Engine...");
-  zeytin.initialize("./zeytin");
+  await zeytin.initialize("./zeytin");
   await ZeytinMini.init("./zeytin");
   print("[+] Initialization complete.\n");
 

@@ -47,7 +47,7 @@ class ZeytinStorage {
   /// } else {
   ///   basePath = '${Directory.systemTemp.path}/zeytin_storage';
   /// }
-  void initialize(String basePath) async {
+  Future<void> initialize(String basePath) async {
     try {
       final directory = Directory(basePath);
       if (!await directory.exists()) {

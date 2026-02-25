@@ -14,7 +14,7 @@ void main() {
         truckID: "test_truck",
         encrypter: ZeytinCipher("my_super_secret_password_123456"),
       );
-      zeytin.initialize("./zeytin");
+      await zeytin.initialize("./zeytin");
 
       // Give the isolate a brief moment to spin up
       await Future.delayed(const Duration(milliseconds: 500));
