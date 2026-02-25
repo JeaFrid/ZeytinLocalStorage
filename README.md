@@ -372,5 +372,3 @@ if (hasToken) {
 // Resetting the system (Completely deletes everything in the Mini box)
 await ZeytinMini.clear();
 ```
-
-# ZeytinLocalStorage

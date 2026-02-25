@@ -299,28 +299,36 @@ class PersistentIndex {
     builder.add(
       (ByteData(
         4,
-      )..setUint32(0, boxIds.length, Endian.little)).buffer.asUint8List(),
+      )..setUint32(0, boxIds.length, Endian.little))
+          .buffer
+          .asUint8List(),
     );
     for (var bId in boxIds) {
       final bBytes = utf8.encode(bId);
       builder.add(
         (ByteData(
           4,
-        )..setUint32(0, bBytes.length, Endian.little)).buffer.asUint8List(),
+        )..setUint32(0, bBytes.length, Endian.little))
+            .buffer
+            .asUint8List(),
       );
       builder.add(bBytes);
       final tags = index[bId]!;
       builder.add(
         (ByteData(
           4,
-        )..setUint32(0, tags.length, Endian.little)).buffer.asUint8List(),
+        )..setUint32(0, tags.length, Endian.little))
+            .buffer
+            .asUint8List(),
       );
       for (var entry in tags.entries) {
         final tBytes = utf8.encode(entry.key);
         builder.add(
           (ByteData(
             4,
-          )..setUint32(0, tBytes.length, Endian.little)).buffer.asUint8List(),
+          )..setUint32(0, tBytes.length, Endian.little))
+              .buffer
+              .asUint8List(),
         );
         builder.add(tBytes);
         final addr = ByteData(8);
@@ -379,8 +387,8 @@ class Truck {
   RandomAccessFile? _reader, _writer;
   Future<void> _lock = Future.value();
   Truck(this.id, this.path)
-    : _index = PersistentIndex('$path/$id.idx'),
-      _cache = LRUCache(10000);
+      : _index = PersistentIndex('$path/$id.idx'),
+        _cache = LRUCache(10000);
   File get _dataFile => File('$path/$id.dat');
   Future<void> initialize() async {
     await _index.load();
@@ -574,39 +582,39 @@ class Truck {
         }
       });
   Future<void> removeTag(String bId, String t) => _synchronized(() async {
-    final oldData = await _readInternal(bId, t);
-    if (oldData != null) _removeFromInternalIndex(bId, t, oldData);
-    _writer ??= await _dataFile.open(mode: FileMode.append);
-    await _writer!.writeFrom(BinaryEncoder.encode(bId, t, null));
-    await _writer!.flush();
-    _index._index[bId]?.remove(t);
-    if (_index._index[bId]?.isEmpty ?? false) _index._index.remove(bId);
-    _cache.remove('$bId:$t');
-    await _index.save();
-    _compactCounter++;
-    if (_compactCounter >= _compactThreshold && !_isCompacting) {
-      _runAutoCompact();
-    }
-  });
+        final oldData = await _readInternal(bId, t);
+        if (oldData != null) _removeFromInternalIndex(bId, t, oldData);
+        _writer ??= await _dataFile.open(mode: FileMode.append);
+        await _writer!.writeFrom(BinaryEncoder.encode(bId, t, null));
+        await _writer!.flush();
+        _index._index[bId]?.remove(t);
+        if (_index._index[bId]?.isEmpty ?? false) _index._index.remove(bId);
+        _cache.remove('$bId:$t');
+        await _index.save();
+        _compactCounter++;
+        if (_compactCounter >= _compactThreshold && !_isCompacting) {
+          _runAutoCompact();
+        }
+      });
   Future<void> removeBox(String bId) => _synchronized(() async {
-    final box = _index.getBox(bId);
-    if (box == null) return;
-    _writer ??= await _dataFile.open(mode: FileMode.append);
-    for (var t in box.keys.toList()) {
-      final oldData = await _readInternal(bId, t);
-      if (oldData != null) _removeFromInternalIndex(bId, t, oldData);
-      await _writer!.writeFrom(BinaryEncoder.encode(bId, t, null));
-      _cache.remove('$bId:$t');
-      _compactCounter++;
-    }
-    await _writer!.flush();
-    _index._index.remove(bId);
-    _fieldIndex.remove(bId);
-    await _index.save();
-    if (_compactCounter >= _compactThreshold && !_isCompacting) {
-      _runAutoCompact();
-    }
-  });
+        final box = _index.getBox(bId);
+        if (box == null) return;
+        _writer ??= await _dataFile.open(mode: FileMode.append);
+        for (var t in box.keys.toList()) {
+          final oldData = await _readInternal(bId, t);
+          if (oldData != null) _removeFromInternalIndex(bId, t, oldData);
+          await _writer!.writeFrom(BinaryEncoder.encode(bId, t, null));
+          _cache.remove('$bId:$t');
+          _compactCounter++;
+        }
+        await _writer!.flush();
+        _index._index.remove(bId);
+        _fieldIndex.remove(bId);
+        await _index.save();
+        if (_compactCounter >= _compactThreshold && !_isCompacting) {
+          _runAutoCompact();
+        }
+      });
   void _runAutoCompact() {
     _isCompacting = true;
     _compactCounter = 0;
@@ -637,41 +645,41 @@ class Truck {
         return res;
       });
   Future<void> compact() => _synchronized(() async {
-    final tempFile = File('$path/${id}_temp.dat'),
-        sink = tempFile.openWrite(),
-        newIndex = PersistentIndex('$path/${id}_temp.idx');
-    int currentOffset = 0;
-    for (var bId in _index._index.keys.toList()) {
-      for (var tag in (_index._index[bId]?.keys.toList() ?? [])) {
-        final data = await _readInternal(bId, tag);
-        if (data != null) {
-          final bytes = BinaryEncoder.encode(bId, tag, data);
-          sink.add(bytes);
-          newIndex.update(bId, tag, currentOffset, bytes.length);
-          currentOffset += bytes.length;
+        final tempFile = File('$path/${id}_temp.dat'),
+            sink = tempFile.openWrite(),
+            newIndex = PersistentIndex('$path/${id}_temp.idx');
+        int currentOffset = 0;
+        for (var bId in _index._index.keys.toList()) {
+          for (var tag in (_index._index[bId]?.keys.toList() ?? [])) {
+            final data = await _readInternal(bId, tag);
+            if (data != null) {
+              final bytes = BinaryEncoder.encode(bId, tag, data);
+              sink.add(bytes);
+              newIndex.update(bId, tag, currentOffset, bytes.length);
+              currentOffset += bytes.length;
+            }
+          }
         }
-      }
-    }
-    await sink.flush();
-    await sink.close();
-    await _reader?.close();
-    await _writer?.close();
-    _reader = _writer = null;
-    final oldDataFile = _dataFile, oldIdxFile = File(_index._file.path);
-    if (await oldDataFile.exists()) await oldDataFile.delete();
-    if (await oldIdxFile.exists()) await oldIdxFile.delete();
-    await tempFile.rename(oldDataFile.path);
-    await File(newIndex._file.path).rename(oldIdxFile.path);
-    _index._index = newIndex._index;
-    await _index.save();
-    _writer = await _dataFile.open(mode: FileMode.append);
-  });
+        await sink.flush();
+        await sink.close();
+        await _reader?.close();
+        await _writer?.close();
+        _reader = _writer = null;
+        final oldDataFile = _dataFile, oldIdxFile = File(_index._file.path);
+        if (await oldDataFile.exists()) await oldDataFile.delete();
+        if (await oldIdxFile.exists()) await oldIdxFile.delete();
+        await tempFile.rename(oldDataFile.path);
+        await File(newIndex._file.path).rename(oldIdxFile.path);
+        _index._index = newIndex._index;
+        await _index.save();
+        _writer = await _dataFile.open(mode: FileMode.append);
+      });
   Future<void> close() async => _synchronized(() async {
-    await _index.save();
-    await _reader?.close();
-    await _writer?.close();
-    _reader = _writer = null;
-  });
+        await _index.save();
+        await _reader?.close();
+        await _writer?.close();
+        _reader = _writer = null;
+      });
 }
 
 class TruckIsolate {
@@ -713,13 +721,11 @@ class TruckProxy {
     _receivePort.listen((message) {
       if (message is SendPort) {
         _sendPort = message;
-        _sendCommand('init', {'id': id, 'path': path})
-            .then((_) {
-              if (!completer.isCompleted) completer.complete();
-            })
-            .catchError((e) {
-              if (!completer.isCompleted) completer.completeError(e);
-            });
+        _sendCommand('init', {'id': id, 'path': path}).then((_) {
+          if (!completer.isCompleted) completer.complete();
+        }).catchError((e) {
+          if (!completer.isCompleted) completer.completeError(e);
+        });
       } else if (message is Map) {
         final msgId = message['id'] as int, msgCompleter = _completers[msgId];
         if (msgCompleter != null) {
@@ -825,9 +831,10 @@ class TruckProxy {
     String bId,
     String f,
     String p,
-  ) async => List<Map<String, dynamic>>.from(
-    await _sendCommand('query', {'boxId': bId, 'field': f, 'prefix': p}),
-  );
+  ) async =>
+      List<Map<String, dynamic>>.from(
+        await _sendCommand('query', {'boxId': bId, 'field': f, 'prefix': p}),
+      );
   Future<void> removeTag(String bId, String t) =>
       _sendCommand('removeTag', {'boxId': bId, 'tag': t});
   Future<void> removeBox(String bId) =>
@@ -854,7 +861,7 @@ class Zeytin {
   final StreamController<Map<String, dynamic>> _changeController =
       StreamController<Map<String, dynamic>>.broadcast();
   Zeytin(this.rootPath, {int cacheSize = 50000})
-    : _memoryCache = LRUCache(cacheSize) {
+      : _memoryCache = LRUCache(cacheSize) {
     Directory(rootPath).createSync(recursive: true);
   }
   Stream<Map<String, dynamic>> get changes => _changeController.stream;
@@ -878,7 +885,6 @@ class Zeytin {
 
   String _cacheKey(String tId, String bId, String t) => '$tId:$bId:$t';
 
-  // API UYUMLULUK METODLARI
   Future<void> put({
     required String truckId,
     required String boxId,

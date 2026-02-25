@@ -2,10 +2,6 @@ import 'dart:async';
 import 'package:zeytin_local_storage/zeytin_local_storage.dart';
 
 Future<void> main() async {
-  print("===========================================");
-  print("   Zeytin🫒 Pure Dart CLI Example Start");
-  print("===========================================\n");
-
   // 1. Initialize Zeytin Storage
   final zeytin = ZeytinStorage(
     namespace: "cli_namespace",
@@ -57,10 +53,6 @@ Future<void> main() async {
   // --- 10. Clean Up ---
   print("\n[*] Cleaning up database...");
   await _cleanup(zeytin);
-
-  print("\n===========================================");
-  print("   Zeytin🫒 CLI Example Finished");
-  print("===========================================");
 }
 
 // --- Helper Functions to keep main() clean ---
