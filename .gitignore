@@ -1,0 +1,4 @@
+.dart_tool/
+pubspec.lock
+full_project_index.txt
+project_indexer.py
