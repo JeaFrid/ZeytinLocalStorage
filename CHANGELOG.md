@@ -7,6 +7,10 @@
 - Improvements on the Zeytin Engine.
 - The use of adapters has been completely removed from Zeytin.
 
-## 1.1.1
+## 1.1.2
 
 - ZeytinValue update.
+
+## 1.2.0
+
+- License Changed.
