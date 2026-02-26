@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
-import 'package:zeytin_local_storage/src/adaptor.dart';
 import 'package:zeytin_local_storage/src/engine.dart';
 import 'package:zeytin_local_storage/src/zeytin_cipher.dart';
 
@@ -15,7 +14,7 @@ class ZeytinValue {
 class ZeytinStorage {
   final String namespace;
   final String truckID;
-  ZeytinStorageAdapter? handler;
+  Zeytin? handler;
   ZeytinCipher? encrypter = ZeytinCipher("zeytin_password");
   ZeytinStorage({
     required this.namespace,
@@ -56,7 +55,7 @@ class ZeytinStorage {
       final testFile = File('$basePath/.test');
       await testFile.writeAsString('test');
       await testFile.delete();
-      handler = ZeytinStorageAdapter(basePath);
+      handler = Zeytin(basePath);
     } catch (e) {
       throw Exception('Zeytin initialization failed: $e');
     }
@@ -132,16 +131,15 @@ class ZeytinStorage {
             "data": payloadToSave,
           };
           if (ttl != null) {
-            finalData["_expiry"] = DateTime.now()
-                .add(ttl)
-                .millisecondsSinceEpoch;
+            finalData["_expiry"] =
+                DateTime.now().add(ttl).millisecondsSinceEpoch;
           }
         }
-        await handler!.write(
+        await handler!.put(
           truckId: truckID,
           boxId: data.box,
           tag: data.tag,
-          data: finalData,
+          value: finalData,
         );
       },
       onSuccess: onSuccess,
@@ -178,9 +176,8 @@ class ZeytinStorage {
               "data": payloadToSave,
             };
             if (ttl != null) {
-              wrappedData["_expiry"] = DateTime.now()
-                  .add(ttl)
-                  .millisecondsSinceEpoch;
+              wrappedData["_expiry"] =
+                  DateTime.now().add(ttl).millisecondsSinceEpoch;
             }
             entryData = wrappedData;
           }
@@ -205,7 +202,7 @@ class ZeytinStorage {
   }) async {
     await _maybeTryAsyncWithReturn(
       () async {
-        final result = await handler!.read(
+        final result = await handler!.get(
           truckId: truckID,
           boxId: boxId,
           tag: tag,
@@ -247,7 +244,7 @@ class ZeytinStorage {
   }) async {
     await _maybeTryAsyncWithReturn(
       () async {
-        final rawBox = await handler!.readBox(truckId: truckID, boxId: boxId);
+        final rawBox = await handler!.getBox(truckId: truckID, boxId: boxId);
         final List<ZeytinValue> validBox = [];
         final now = DateTime.now().millisecondsSinceEpoch;
         for (var entry in rawBox.entries) {
@@ -283,7 +280,7 @@ class ZeytinStorage {
     Function(String e, String s)? onError,
   }) async {
     await _maybeTryAsyncWithReturn(
-      () async => await handler!.getAllTrucks(),
+      () async => handler!.getAllTruck(),
       onSuccess: onSuccess,
       onError: onError,
     );
@@ -350,8 +347,7 @@ class ZeytinStorage {
     Function(String e, String s)? onError,
   }) async {
     await _maybeTryAsyncWithReturn(
-      () async =>
-          await handler!.contains(truckId: truckID, boxId: boxId, tag: tag),
+      () async => await handler!.contains(truckID, boxId, tag),
       onSuccess: onSuccess,
       onError: onError,
     );
