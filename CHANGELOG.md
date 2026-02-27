@@ -14,3 +14,8 @@
 ## 1.2.0
 
 - License Changed.
+
+## 1.2.1
+
+- Zeytin engine now supports getAllBoxes.
+- The getAllBoxes function has been added to the ZeytinStorage class. You can now retrieve all your boxes.

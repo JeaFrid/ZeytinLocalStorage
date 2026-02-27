@@ -684,6 +684,9 @@ class Truck {
         }
         return res;
       });
+  Future<List<String>> getAllBoxes() => _synchronized(() async {
+        return _index._index.keys.toList();
+      });
   Future<void> compact() => _synchronized(() async {
         final tempFile = File('$path/${id}_temp.dat'),
             sink = tempFile.openWrite(),
@@ -739,6 +742,7 @@ class TruckIsolate {
       _truck.readBox(bId);
   Future<List<Map<String, dynamic>>> query(String bId, String f, String p) =>
       _truck.query(bId, f, p);
+  Future<List<String>> getAllBoxes() => _truck.getAllBoxes();
   Future<void> compact() => _truck.compact();
   Future<void> close() => _truck.close();
   Future<void> removeTag(String bId, String t) => _truck.removeTag(bId, t);
@@ -806,6 +810,9 @@ class TruckProxy {
             case 'read':
               res = await truckIsolate.read(params['boxId'], params['tag']);
               break;
+            case 'getAllBoxes':
+              res = await truckIsolate.getAllBoxes();
+              break;
             case 'batch':
               await truckIsolate.batch(params['boxId'], params['entries']);
               break;
@@ -845,6 +852,8 @@ class TruckProxy {
     });
   }
 
+  Future<List<String>> getAllBoxes() async =>
+      List<String>.from(await _sendCommand('getAllBoxes', {}));
   Future<dynamic> _sendCommand(String command, Map<String, dynamic> params) {
     final id = _messageId++, completer = Completer<dynamic>();
     _completers[id] = completer;
@@ -1107,6 +1116,11 @@ class Zeytin {
               e.path.split(Platform.pathSeparator).last.replaceAll('.dat', ''),
         )
         .toList();
+  }
+
+  Future<List<String>> getAllBoxes(String truckId) async {
+    final truck = await _resolveTruck(truckId: truckId);
+    return await truck.getAllBoxes();
   }
 
   Future<void> close() async {

@@ -56,30 +56,6 @@ class ZeytinStorage {
     this.encrypter,
   });
 
-  ///if (Platform.isAndroid) {
-  ///   final directory = await path_provider
-  ///       .getApplicationDocumentsDirectory();
-  ///   basePath = '${directory.path}/zeytin_storage';
-  /// } else if (Platform.isIOS) {
-  ///   final directory = await path_provider
-  ///       .getApplicationDocumentsDirectory();
-  ///   basePath = '${directory.path}/zeytin_storage';
-  /// } else if (Platform.isMacOS) {
-  ///   final directory = await path_provider.getApplicationSupportDirectory();
-  ///   basePath = '${directory.path}/zeytin_storage';
-  /// } else if (Platform.isWindows) {
-  ///   final appData =
-  ///       Platform.environment['APPDATA'] ??
-  ///       '${Platform.environment['USERPROFILE']}\\AppData\\Roaming';
-  ///   basePath = '$appData\\zeytin_storage';
-  /// } else if (Platform.isLinux) {
-  ///   final dataHome =
-  ///       Platform.environment['XDG_DATA_HOME'] ??
-  ///       '${Platform.environment['HOME']}/.local/share';
-  ///   basePath = '$dataHome/zeytin_storage';
-  /// } else {
-  ///   basePath = '${Directory.systemTemp.path}/zeytin_storage';
-  /// }
   Future<void> initialize(String basePath) async {
     try {
       final directory = Directory(basePath);
@@ -304,6 +280,17 @@ class ZeytinStorage {
         }
         return validBox;
       },
+      onSuccess: onSuccess,
+      onError: onError,
+    );
+  }
+
+  Future<void> getAllBoxes({
+    required Function(List<String> result) onSuccess,
+    Function(String e, String s)? onError,
+  }) async {
+    await _maybeTryAsyncWithReturn(
+      () async => await handler!.getAllBoxes(truckID),
       onSuccess: onSuccess,
       onError: onError,
     );
