@@ -19,3 +19,7 @@
 
 - Zeytin engine now supports getAllBoxes.
 - The getAllBoxes function has been added to the ZeytinStorage class. You can now retrieve all your boxes.
+
+## 1.2.2
+
+- Readme Update.
