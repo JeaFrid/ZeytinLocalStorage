@@ -105,20 +105,23 @@ class BinaryEncoder {
       typeMAP = 6,
       typeDATETIME = 7,
       typeUINT8LIST = 8,
-      magicByte = 0xDB;
+      typeBIGINT = 9,
+      magicByteV1 = 0xDB,
+      magicByteV2 = 0xDC;
+
   static Uint8List encode(
-    String boxId,
-    String tag,
-    Map<String, dynamic>? data,
-  ) {
+      String boxId, String tag, Map<String, dynamic>? data) {
     final builder = BytesBuilder();
-    builder.addByte(magicByte);
+    builder.addByte(magicByteV2);
+
     final boxBytes = utf8.encode(boxId);
     _encodeRawLength(builder, boxBytes.length);
     builder.add(boxBytes);
+
     final tagBytes = utf8.encode(tag);
     _encodeRawLength(builder, tagBytes.length);
     builder.add(tagBytes);
+
     if (data == null) {
       _encodeRawLength(builder, 0);
     } else {
@@ -126,7 +129,32 @@ class BinaryEncoder {
       _encodeRawLength(builder, dataBytes.length);
       builder.add(dataBytes);
     }
-    return builder.toBytes();
+
+    final payload = builder.toBytes();
+    final crc = calculateCRC32(payload);
+
+    final finalBuilder = BytesBuilder();
+    finalBuilder.add(payload);
+
+    final crcBytes = ByteData(4)..setUint32(0, crc, Endian.little);
+    finalBuilder.add(crcBytes.buffer.asUint8List());
+
+    return finalBuilder.toBytes();
+  }
+
+  static int calculateCRC32(Uint8List bytes) {
+    int crc = 0xFFFFFFFF;
+    for (int i = 0; i < bytes.length; i++) {
+      crc ^= bytes[i];
+      for (int j = 0; j < 8; j++) {
+        if ((crc & 1) != 0) {
+          crc = (crc >> 1) ^ 0xEDB88320;
+        } else {
+          crc >>= 1;
+        }
+      }
+    }
+    return crc ^ 0xFFFFFFFF;
   }
 
   static Uint8List encodeMap(Map<String, dynamic> data) {
@@ -188,6 +216,11 @@ class BinaryEncoder {
       final bytes = ByteData(8);
       bytes.setInt64(0, value.millisecondsSinceEpoch, Endian.little);
       builder.add(bytes.buffer.asUint8List());
+    } else if (value is BigInt) {
+      builder.addByte(typeBIGINT);
+      final utf8Bytes = utf8.encode(value.toString());
+      _encodeRawLength(builder, utf8Bytes.length);
+      builder.add(utf8Bytes);
     } else {
       throw ArgumentError('Unsupported type: ${value.runtimeType}');
     }
@@ -217,6 +250,15 @@ class BinaryEncoder {
           reader.buffer.asUint8List(reader.offsetInBytes + offset, len),
         );
         return MapEntry(offset + len, val);
+
+      case typeBIGINT:
+        final len = reader.getUint32(offset, Endian.little);
+        offset += 4;
+        final valStr = utf8.decode(
+          reader.buffer.asUint8List(reader.offsetInBytes + offset, len),
+        );
+        return MapEntry(offset + len, BigInt.parse(valStr));
+
       case typeUINT8LIST:
         final len = reader.getUint32(offset, Endian.little);
         offset += 4;
@@ -386,6 +428,11 @@ class Truck {
   final PersistentIndex _index;
   final LRUCache<String, Map<String, dynamic>> _cache;
   final Map<String, Map<String, Map<String, Set<String>>>> _fieldIndex = {};
+  final Map<String, Map<String, dynamic>?> _writeBuffer = {};
+  Timer? _flushTimer;
+  bool _isFlushing = false;
+  final int _flushCountThreshold = 100;
+  final Duration _flushTimeThreshold = const Duration(milliseconds: 500);
   int _compactCounter = 0, _dirtyCount = 0;
   final int _compactThreshold = 500, _saveThreshold = 500;
   bool _isCompacting = false, _isSavingIndex = false;
@@ -401,11 +448,46 @@ class Truck {
       if (await _dataFile.exists()) {
         await _repair();
         await _rebuildSearchIndex();
+        if (await _needsMigration()) {
+          print(
+              "Zeytin: Eski veri formatı (V1) tespit edildi. Yeni formata (V2) sessiz göç başlatılıyor...");
+          print("Zeytin: Veritabanı başarıyla yeni mimariye güncellendi.");
+        }
+
         _writer = await _dataFile.open(mode: FileMode.append);
       }
     } catch (e, stack) {
       print("Truck Initialize Error: $e\n$stack");
     }
+  }
+
+  Future<bool> _needsMigration() async {
+    if (_index._index.isEmpty) return false;
+    try {
+      final raf = await _dataFile.open(mode: FileMode.read);
+      int firstOffset = -1;
+      for (var box in _index._index.values) {
+        for (var addr in box.values) {
+          if (firstOffset == -1 || addr[0] < firstOffset) {
+            firstOffset = addr[0];
+          }
+        }
+      }
+
+      if (firstOffset != -1) {
+        await raf.setPosition(firstOffset);
+        final magicList = await raf.read(1);
+        await raf.close();
+        if (magicList.isNotEmpty && magicList[0] == BinaryEncoder.magicByteV1) {
+          return true;
+        }
+      } else {
+        await raf.close();
+      }
+    } catch (e) {
+      print("Zeytin Migration Check Error: $e");
+    }
+    return false;
   }
 
   Future<T> _synchronized<T>(Future<T> Function() action) {
@@ -415,7 +497,11 @@ class Truck {
   }
 
   Future<Map<String, dynamic>?> _readInternal(String bId, String t) async {
-    final key = '$bId:$t', c = _cache.get(key);
+    final key = '$bId:$t';
+    if (_writeBuffer.containsKey(key)) {
+      return _writeBuffer[key];
+    }
+    final c = _cache.get(key);
     if (c != null) return c;
     final addr = _index.get(bId, t);
     if (addr == null) return null;
@@ -423,9 +509,27 @@ class Truck {
       _reader ??= await _dataFile.open(mode: FileMode.read);
       await _reader!.setPosition(addr[0]);
       final block = await _reader!.read(addr[1]);
-      if (block.length < addr[1]) return null;
+      if (block.length < addr[1] || block.isEmpty) return null;
+      final magicByte = block[0];
+      ByteData blockReader;
+      if (magicByte == BinaryEncoder.magicByteV2) {
+        if (block.length < 5) return null;
+        final payload = block.sublist(0, block.length - 4);
+        final storedCrc = ByteData.sublistView(block, block.length - 4)
+            .getUint32(0, Endian.little);
 
-      final blockReader = ByteData.sublistView(block);
+        if (BinaryEncoder.calculateCRC32(payload) != storedCrc) {
+          print(
+              "Zeytin Warning: Corrupted data detected (Reading canceled): $bId:$t");
+          return null;
+        }
+        blockReader = ByteData.sublistView(payload);
+      } else if (magicByte == BinaryEncoder.magicByteV1) {
+        blockReader = ByteData.sublistView(block);
+      } else {
+        print("Zeytin Warning: Unknown magic byte ($magicByte) for $bId:$t");
+        return null;
+      }
       int offset = 1;
       final boxIdLen = blockReader.getUint32(offset, Endian.little);
       offset += 4 + boxIdLen;
@@ -434,7 +538,6 @@ class Truck {
       final dataLen = blockReader.getUint32(offset, Endian.little);
       offset += 4;
       if (dataLen == 0) return null;
-
       final data = BinaryEncoder.decodeValue(
         block.sublist(offset, offset + dataLen),
       );
@@ -446,6 +549,90 @@ class Truck {
     }
   }
 
+  void _scheduleFlush() {
+    if (_isFlushing) return;
+    _flushTimer?.cancel();
+    if (_writeBuffer.length >= _flushCountThreshold) {
+      _isFlushing = true;
+      _flushBuffer();
+    } else {
+      _flushTimer = Timer(_flushTimeThreshold, () {
+        if (_isFlushing) return;
+        _isFlushing = true;
+        _flushBuffer();
+      });
+    }
+  }
+
+  Future<void> _flushCore() async {
+    if (_writeBuffer.isEmpty) return;
+    _isFlushing = true;
+    final pendingWrites = Map<String, Map<String, dynamic>?>.from(_writeBuffer);
+    _writeBuffer.clear();
+
+    try {
+      _writer ??= await _dataFile.open(mode: FileMode.append);
+      final txId = DateTime.now().microsecondsSinceEpoch.toString();
+      final startBytes = BinaryEncoder.encode(
+          '__SYS__', 'TX_START_$txId', {'count': pendingWrites.length});
+      var currentOffset = await _writer!.length();
+      await _writer!.writeFrom(startBytes);
+      currentOffset += startBytes.length;
+      final List<Map<String, dynamic>> tempUpdates = [];
+
+      for (var entry in pendingWrites.entries) {
+        final colonPos = entry.key.indexOf(':');
+        final bId = entry.key.substring(0, colonPos);
+        final tag = entry.key.substring(colonPos + 1);
+        final value = entry.value;
+        final bytes = BinaryEncoder.encode(bId, tag, value);
+        await _writer!.writeFrom(bytes);
+
+        tempUpdates.add({
+          'boxId': bId,
+          'tag': tag,
+          'off': currentOffset,
+          'len': bytes.length,
+          'val': value
+        });
+        currentOffset += bytes.length;
+        _dirtyCount++;
+        _compactCounter++;
+      }
+      final commitBytes =
+          BinaryEncoder.encode('__SYS__', 'TX_COMMIT_$txId', null);
+      await _writer!.writeFrom(commitBytes);
+      await _writer!.flush();
+
+      for (var u in tempUpdates) {
+        final bId = u['boxId'] as String;
+        final tag = u['tag'] as String;
+        final val = u['val'];
+
+        if (val == null) {
+          _index._index[bId]?.remove(tag);
+          if (_index._index[bId]?.isEmpty ?? false) _index._index.remove(bId);
+        } else {
+          _index.update(bId, tag, u['off'], u['len']);
+        }
+      }
+      if (_dirtyCount >= _saveThreshold && !_isSavingIndex) _autoSave();
+      if (_compactCounter >= _compactThreshold && !_isCompacting) {
+        _runAutoCompact();
+      }
+    } catch (e, stackTrace) {
+      print("Zeytin Engine (Flush) Error: $e\n$stackTrace");
+    } finally {
+      _isFlushing = false;
+    }
+  }
+
+  Future<void> _flushBuffer() => _synchronized(() async {
+        await _flushCore();
+        if (_writeBuffer.isNotEmpty) {
+          _scheduleFlush();
+        }
+      });
   Future<void> _rebuildSearchIndex() async {
     for (var bId in _index._index.keys) {
       final boxData = _index.getBox(bId);
@@ -512,95 +699,194 @@ class Truck {
     final int actual = await _dataFile.length();
     final int last = _index.getMaxIndexedOffset();
     if (actual <= last) return;
+
     final raf = await _dataFile.open(mode: FileMode.read);
     await raf.setPosition(last);
     int pos = last;
+    bool inTx = false;
+    String currentTx = "";
+    List<Map<String, dynamic>> txBuffer = [];
 
     while (pos < actual) {
       try {
+        await raf.setPosition(pos);
         final magicList = await raf.read(1);
-        if (magicList.isEmpty || magicList[0] != BinaryEncoder.magicByte) break;
+        if (magicList.isEmpty) break;
+
+        final magic = magicList[0];
+        // Sadece V1 veya V2 ise işlem yap, yoksa bozuk byte'ı atla
+        if (magic != BinaryEncoder.magicByteV1 &&
+            magic != BinaryEncoder.magicByteV2) {
+          pos++;
+          continue;
+        }
+
         final bLenBytes = await raf.read(4);
-        if (bLenBytes.length < 4) break;
-        final bLen = ByteData.sublistView(
-          bLenBytes,
-        ).getUint32(0, Endian.little);
+        if (bLenBytes.length < 4) {
+          pos++;
+          continue;
+        }
+        final bLen =
+            ByteData.sublistView(bLenBytes).getUint32(0, Endian.little);
+        if (bLen <= 0 || bLen > 1024) {
+          pos++;
+          continue;
+        }
 
         final boxIdBytes = await raf.read(bLen);
-        if (boxIdBytes.length < bLen) break;
         final boxId = utf8.decode(boxIdBytes);
 
         final tLenBytes = await raf.read(4);
-        if (tLenBytes.length < 4) break;
-        final tLen = ByteData.sublistView(
-          tLenBytes,
-        ).getUint32(0, Endian.little);
+        final tLen =
+            ByteData.sublistView(tLenBytes).getUint32(0, Endian.little);
+        if (tLen <= 0 || tLen > 1024) {
+          pos++;
+          continue;
+        }
 
         final tagBytes = await raf.read(tLen);
-        if (tagBytes.length < tLen) break;
         final tag = utf8.decode(tagBytes);
 
         final dLenBytes = await raf.read(4);
-        if (dLenBytes.length < 4) break;
-        final dLen = ByteData.sublistView(
-          dLenBytes,
-        ).getUint32(0, Endian.little);
+        final dLen =
+            ByteData.sublistView(dLenBytes).getUint32(0, Endian.little);
+
+        // Payload (Verinin CRC'siz kısmı) hesaplanıyor
+        final payloadLength = 1 + 4 + bLen + 4 + tLen + 4 + dLen;
+
+        // EĞER V2 İSE 4 BYTE CRC EKLENİYOR
+        final totalLength = (magic == BinaryEncoder.magicByteV2)
+            ? payloadLength + 4
+            : payloadLength;
+
+        if (pos + totalLength > actual) {
+          pos++;
+          continue;
+        }
+
+        await raf.setPosition(pos);
+        final block = await raf.read(totalLength);
+        final payload = block.sublist(0, payloadLength);
+
+        // V2 İÇİN CRC DOĞRULAMASI
+        if (magic == BinaryEncoder.magicByteV2) {
+          final storedCrc = ByteData.sublistView(block, payloadLength)
+              .getUint32(0, Endian.little);
+          if (BinaryEncoder.calculateCRC32(payload) != storedCrc) {
+            print(
+                "Zeytin Repair: Bad record skipped (CRC Error) [$boxId:$tag]");
+            pos++;
+            continue;
+          }
+        }
 
         Map<String, dynamic>? data;
         if (dLen > 0) {
-          final dataBytes = await raf.read(dLen);
-          if (dataBytes.length < dLen) break;
-          try {
-            data = BinaryEncoder.decodeValue(dataBytes);
-          } catch (e) {
-            print("Veri onarma hatası (Atlandı) [$boxId:$tag] - $e");
-            data = null;
-          }
+          final dataBytes =
+              payload.sublist(payloadLength - dLen, payloadLength);
+          data = BinaryEncoder.decodeValue(dataBytes);
         }
-        final newPos = await raf.position();
-        final total = newPos - pos;
 
-        if (data == null) {
-          _index._index[boxId]?.remove(tag);
-          if (_index._index[boxId]?.isEmpty ?? false) {
-            _index._index.remove(boxId);
+        if (boxId == '__SYS__') {
+          if (tag.startsWith('TX_START_')) {
+            inTx = true;
+            currentTx = tag.replaceFirst('TX_START_', '');
+            txBuffer.clear();
+          } else if (tag.startsWith('TX_COMMIT_')) {
+            final commitTx = tag.replaceFirst('TX_COMMIT_', '');
+            if (inTx && currentTx == commitTx) {
+              for (var item in txBuffer) {
+                if (item['data'] == null) {
+                  _index._index[item['boxId']]?.remove(item['tag']);
+                  if (_index._index[item['boxId']]?.isEmpty ?? false) {
+                    _index._index.remove(item['boxId']);
+                  }
+                } else {
+                  _index.update(
+                      item['boxId'], item['tag'], item['pos'], item['len']);
+                }
+              }
+            }
+            inTx = false;
+            txBuffer.clear();
           }
         } else {
-          _index.update(boxId, tag, pos, total);
+          if (inTx) {
+            txBuffer.add({
+              'boxId': boxId,
+              'tag': tag,
+              'pos': pos,
+              'len': totalLength,
+              'data': data
+            });
+          } else {
+            if (data == null) {
+              _index._index[boxId]?.remove(tag);
+              if (_index._index[boxId]?.isEmpty ?? false) {
+                _index._index.remove(boxId);
+              }
+            } else {
+              _index.update(boxId, tag, pos, totalLength);
+            }
+          }
         }
-        pos = newPos;
+
+        pos += totalLength;
       } catch (e) {
-        print("Kritik Okuma Hatası (Döngü durdu): $e");
-        break;
+        pos++;
       }
     }
     await raf.close();
     await _index.save();
   }
 
-  Future<void> write(String bId, String t, Map<String, dynamic> v) =>
+  Future<void> write(String bId, String t, Map<String, dynamic> v,
+          {bool sync = false}) =>
       _synchronized(() async {
         final oldData = await _readInternal(bId, t);
         if (oldData != null) _removeFromInternalIndex(bId, t, oldData);
-        _writer ??= await _dataFile.open(mode: FileMode.append);
-        final off = await _writer!.length(),
-            bytes = BinaryEncoder.encode(bId, t, v);
-        await _writer!.writeFrom(bytes);
-        await _writer!.flush();
-        _index.update(bId, t, off, bytes.length);
         _updateInternalIndex(bId, t, v);
         _cache.put('$bId:$t', v);
-        _dirtyCount++;
-        _compactCounter++;
-        if (_dirtyCount >= _saveThreshold && !_isSavingIndex) _autoSave();
-        if (_compactCounter >= _compactThreshold && !_isCompacting) {
-          _runAutoCompact();
+        _writeBuffer['$bId:$t'] = v;
+
+        if (sync) {
+          _flushTimer?.cancel();
+          await _flushCore();
+        } else {
+          _scheduleFlush();
         }
+      });
+
+  Future<bool> putCAS(String bId, String t, Map<String, dynamic> v,
+          String casField, dynamic expectedValue,
+          {bool sync = false}) =>
+      _synchronized(() async {
+        final oldData = await _readInternal(bId, t);
+        if (oldData?[casField] != expectedValue) return false;
+
+        if (oldData != null) _removeFromInternalIndex(bId, t, oldData);
+        _updateInternalIndex(bId, t, v);
+        _cache.put('$bId:$t', v);
+        _writeBuffer['$bId:$t'] = v;
+
+        if (sync) {
+          _flushTimer?.cancel();
+          await _flushCore();
+        } else {
+          _scheduleFlush();
+        }
+        return true;
       });
   Future<void> batch(String bId, Map<String, Map<String, dynamic>> entries) =>
       _synchronized(() async {
         _writer ??= await _dataFile.open(mode: FileMode.append);
+        final txId = DateTime.now().microsecondsSinceEpoch.toString();
+        final startBytes = BinaryEncoder.encode(
+            '__SYS__', 'TX_START_$txId', {'count': entries.length});
         var off = await _writer!.length();
+        await _writer!.writeFrom(startBytes);
+        off += startBytes.length;
+        final List<Map<String, dynamic>> tempUpdates = [];
         for (var entry in entries.entries) {
           final oldData = await _readInternal(bId, entry.key);
           if (oldData != null) {
@@ -608,51 +894,63 @@ class Truck {
           }
           final bytes = BinaryEncoder.encode(bId, entry.key, entry.value);
           await _writer!.writeFrom(bytes);
-          _index.update(bId, entry.key, off, bytes.length);
-          _updateInternalIndex(bId, entry.key, entry.value);
-          _cache.put('$bId:${entry.key}', entry.value);
+          tempUpdates.add({
+            'tag': entry.key,
+            'off': off,
+            'len': bytes.length,
+            'val': entry.value
+          });
           off += bytes.length;
           _dirtyCount++;
           _compactCounter++;
         }
+        final commitBytes =
+            BinaryEncoder.encode('__SYS__', 'TX_COMMIT_$txId', null);
+        await _writer!.writeFrom(commitBytes);
         await _writer!.flush();
+        for (var u in tempUpdates) {
+          _index.update(bId, u['tag'], u['off'], u['len']);
+          _updateInternalIndex(bId, u['tag'], u['val']);
+          _cache.put('$bId:${u['tag']}', u['val']);
+        }
+
         if (_dirtyCount >= _saveThreshold && !_isSavingIndex) _autoSave();
         if (_compactCounter >= _compactThreshold && !_isCompacting) {
           _runAutoCompact();
         }
       });
-  Future<void> removeTag(String bId, String t) => _synchronized(() async {
+  Future<void> removeTag(String bId, String t, {bool sync = false}) =>
+      _synchronized(() async {
         final oldData = await _readInternal(bId, t);
         if (oldData != null) _removeFromInternalIndex(bId, t, oldData);
-        _writer ??= await _dataFile.open(mode: FileMode.append);
-        await _writer!.writeFrom(BinaryEncoder.encode(bId, t, null));
-        await _writer!.flush();
-        _index._index[bId]?.remove(t);
-        if (_index._index[bId]?.isEmpty ?? false) _index._index.remove(bId);
         _cache.remove('$bId:$t');
-        await _index.save();
-        _compactCounter++;
-        if (_compactCounter >= _compactThreshold && !_isCompacting) {
-          _runAutoCompact();
+        _writeBuffer['$bId:$t'] = null;
+
+        if (sync) {
+          _flushTimer?.cancel();
+          await _flushCore();
+        } else {
+          _scheduleFlush();
         }
       });
-  Future<void> removeBox(String bId) => _synchronized(() async {
+  Future<void> removeBox(String bId, {bool sync = false}) =>
+      _synchronized(() async {
         final box = _index.getBox(bId);
         if (box == null) return;
-        _writer ??= await _dataFile.open(mode: FileMode.append);
         for (var t in box.keys.toList()) {
           final oldData = await _readInternal(bId, t);
           if (oldData != null) _removeFromInternalIndex(bId, t, oldData);
-          await _writer!.writeFrom(BinaryEncoder.encode(bId, t, null));
           _cache.remove('$bId:$t');
-          _compactCounter++;
+          _writeBuffer['$bId:$t'] = null;
         }
-        await _writer!.flush();
         _index._index.remove(bId);
         _fieldIndex.remove(bId);
-        await _index.save();
-        if (_compactCounter >= _compactThreshold && !_isCompacting) {
-          _runAutoCompact();
+
+        if (sync) {
+          _flushTimer?.cancel();
+          await _flushCore();
+        } else {
+          _scheduleFlush();
         }
       });
   void _runAutoCompact() {
@@ -685,39 +983,95 @@ class Truck {
         return res;
       });
   Future<List<String>> getAllBoxes() => _synchronized(() async {
-        return _index._index.keys.toList();
+        return _index._index.keys.where((k) => k != '__SYS__').toList();
       });
   Future<void> compact() => _synchronized(() async {
-        final tempFile = File('$path/${id}_temp.dat'),
-            sink = tempFile.openWrite(),
-            newIndex = PersistentIndex('$path/${id}_temp.idx');
-        int currentOffset = 0;
-        for (var bId in _index._index.keys.toList()) {
-          for (var tag in (_index._index[bId]?.keys.toList() ?? [])) {
-            final data = await _readInternal(bId, tag);
-            if (data != null) {
-              final bytes = BinaryEncoder.encode(bId, tag, data);
-              sink.add(bytes);
-              newIndex.update(bId, tag, currentOffset, bytes.length);
-              currentOffset += bytes.length;
+        final tempDatPath = '$path/${id}_temp.dat';
+        final tempIdxPath = '$path/${id}_temp.idx';
+        final tempFile = File(tempDatPath);
+        final newIndex = PersistentIndex(tempIdxPath);
+
+        IOSink? sink;
+        bool preparationSuccess = false;
+        try {
+          sink = tempFile.openWrite();
+          int currentOffset = 0;
+
+          for (var bId in _index._index.keys.toList()) {
+            for (var tag in (_index._index[bId]?.keys.toList() ?? [])) {
+              final data = await _readInternal(bId, tag);
+              if (data != null) {
+                final bytes = BinaryEncoder.encode(bId, tag, data);
+                sink.add(bytes);
+                newIndex.update(bId, tag, currentOffset, bytes.length);
+                currentOffset += bytes.length;
+              }
             }
           }
+          await sink.flush();
+          await sink.close();
+          sink = null;
+          await newIndex.save();
+          preparationSuccess = true;
+        } catch (e) {
+          print("Zeytin Engine (Compact) Preparation Error: $e");
+        } finally {
+          if (sink != null) await sink.close();
         }
-        await sink.flush();
-        await sink.close();
-        await _reader?.close();
-        await _writer?.close();
-        _reader = _writer = null;
-        final oldDataFile = _dataFile, oldIdxFile = File(_index._file.path);
-        if (await oldDataFile.exists()) await oldDataFile.delete();
-        if (await oldIdxFile.exists()) await oldIdxFile.delete();
-        await tempFile.rename(oldDataFile.path);
-        await File(newIndex._file.path).rename(oldIdxFile.path);
-        _index._index = newIndex._index;
-        await _index.save();
-        _writer = await _dataFile.open(mode: FileMode.append);
+        if (!preparationSuccess) {
+          if (await tempFile.exists()) await tempFile.delete();
+          if (await File(tempIdxPath).exists()) {
+            await File(tempIdxPath).delete();
+          }
+          return;
+        }
+        final oldDataFile = _dataFile;
+        final oldIdxFile = File(_index._file.path);
+        final backupDataFile = File('$path/${id}_bak.dat');
+        final backupIdxFile = File('$path/${id}_bak.idx');
+        try {
+          await _reader?.close();
+          await _writer?.close();
+          _reader = _writer = null;
+          if (await backupDataFile.exists()) await backupDataFile.delete();
+          if (await backupIdxFile.exists()) await backupIdxFile.delete();
+          if (await oldDataFile.exists()) {
+            await oldDataFile.rename(backupDataFile.path);
+          }
+          if (await oldIdxFile.exists()) {
+            await oldIdxFile.rename(backupIdxFile.path);
+          }
+          await tempFile.rename(oldDataFile.path);
+          await File(tempIdxPath).rename(oldIdxFile.path);
+          _index._index = newIndex._index;
+          if (await backupDataFile.exists()) await backupDataFile.delete();
+          if (await backupIdxFile.exists()) await backupIdxFile.delete();
+        } catch (e) {
+          print("Zeytin Engine (Compact) Critical File Error: $e");
+          try {
+            if (await backupDataFile.exists() &&
+                !(await oldDataFile.exists())) {
+              await backupDataFile.rename(oldDataFile.path);
+            }
+            if (await backupIdxFile.exists() && !(await oldIdxFile.exists())) {
+              await backupIdxFile.rename(oldIdxFile.path);
+            }
+          } catch (restoreError) {
+            print("Zeytin Engine (Compact) Recovery Failed: $restoreError");
+          }
+        } finally {
+          try {
+            _writer = await _dataFile.open(mode: FileMode.append);
+          } catch (e) {
+            print("Zeytin Engine (Compact) Restart Error: $e");
+          }
+        }
       });
   Future<void> close() async => _synchronized(() async {
+        _flushTimer?.cancel();
+        if (_writeBuffer.isNotEmpty) {
+          await _flushBuffer();
+        }
         await _index.save();
         await _reader?.close();
         await _writer?.close();
@@ -732,8 +1086,11 @@ class TruckIsolate {
     await _truck.initialize();
   }
 
-  Future<void> write(String bId, String t, Map<String, dynamic> v) =>
-      _truck.write(bId, t, v);
+  Future<void> write(String bId, String t, Map<String, dynamic> v, bool sync) =>
+      _truck.write(bId, t, v, sync: sync);
+  Future<bool> putCAS(String bId, String t, Map<String, dynamic> v, String casF,
+          dynamic expV, bool sync) =>
+      _truck.putCAS(bId, t, v, casF, expV, sync: sync);
   Future<Map<String, dynamic>?> read(String bId, String t) =>
       _truck.read(bId, t);
   Future<void> batch(String bId, Map<String, Map<String, dynamic>> e) =>
@@ -745,8 +1102,10 @@ class TruckIsolate {
   Future<List<String>> getAllBoxes() => _truck.getAllBoxes();
   Future<void> compact() => _truck.compact();
   Future<void> close() => _truck.close();
-  Future<void> removeTag(String bId, String t) => _truck.removeTag(bId, t);
-  Future<void> removeBox(String bId) => _truck.removeBox(bId);
+  Future<void> removeTag(String bId, String t, bool sync) =>
+      _truck.removeTag(bId, t, sync: sync);
+  Future<void> removeBox(String bId, bool sync) =>
+      _truck.removeBox(bId, sync: sync);
   Future<bool> contains(String bId, String t) async =>
       (await _truck.read(bId, t)) != null;
 }
@@ -785,6 +1144,38 @@ class TruckProxy {
     return completer.future;
   }
 
+  Future<void> writeSync(String bId, String t, Map<String, dynamic> v) =>
+      _sendCommand('write', {'boxId': bId, 'tag': t, 'value': v, 'sync': true});
+
+  Future<void> removeTagSync(String bId, String t) =>
+      _sendCommand('removeTag', {'boxId': bId, 'tag': t, 'sync': true});
+
+  Future<void> removeBoxSync(String bId) =>
+      _sendCommand('removeBox', {'boxId': bId, 'sync': true});
+  void writeFast(String bId, String t, Map<String, dynamic> v) {
+    _sendPort.send({
+      'command': 'write',
+      'params': {'boxId': bId, 'tag': t, 'value': v},
+      'id': -1
+    });
+  }
+
+  void removeTagFast(String bId, String t) {
+    _sendPort.send({
+      'command': 'removeTag',
+      'params': {'boxId': bId, 'tag': t},
+      'id': -1
+    });
+  }
+
+  void removeBoxFast(String bId) {
+    _sendPort.send({
+      'command': 'removeBox',
+      'params': {'boxId': bId},
+      'id': -1
+    });
+  }
+
   static void _startTruckIsolate(SendPort sendPort) {
     final receivePort = ReceivePort();
     sendPort.send(receivePort.sendPort);
@@ -801,11 +1192,17 @@ class TruckProxy {
               await truckIsolate.init(params['id'], params['path']);
               break;
             case 'write':
-              await truckIsolate.write(
-                params['boxId'],
-                params['tag'],
-                params['value'],
-              );
+              await truckIsolate.write(params['boxId'], params['tag'],
+                  params['value'], params['sync'] ?? false);
+              break;
+            case 'putCAS':
+              res = await truckIsolate.putCAS(
+                  params['boxId'],
+                  params['tag'],
+                  params['value'],
+                  params['casField'],
+                  params['expectedValue'],
+                  params['sync'] ?? false);
               break;
             case 'read':
               res = await truckIsolate.read(params['boxId'], params['tag']);
@@ -827,10 +1224,12 @@ class TruckProxy {
               );
               break;
             case 'removeTag':
-              await truckIsolate.removeTag(params['boxId'], params['tag']);
+              await truckIsolate.removeTag(
+                  params['boxId'], params['tag'], params['sync'] ?? false);
               break;
             case 'removeBox':
-              await truckIsolate.removeBox(params['boxId']);
+              await truckIsolate.removeBox(
+                  params['boxId'], params['sync'] ?? false);
               break;
             case 'compact':
               await truckIsolate.compact();
@@ -842,16 +1241,33 @@ class TruckProxy {
               res = await truckIsolate.contains(params['boxId'], params['tag']);
               break;
           }
-          sendPort.send({'id': id, 'result': res});
+          if (id != -1) {
+            sendPort.send({'id': id, 'result': res});
+          }
           if (command == 'close') receivePort.close();
         } catch (e, stackTrace) {
           print("ISOLATE FATAL ERROR: $e\n$stackTrace");
-          sendPort.send({'id': id, 'error': e.toString()});
+          if (id != -1) {
+            sendPort.send({'id': id, 'error': e.toString()});
+          }
+
+          if (command == 'close') receivePort.close();
         }
       }
     });
   }
 
+  Future<bool> putCAS(String bId, String t, Map<String, dynamic> v, String casF,
+          dynamic expV,
+          {bool sync = false}) async =>
+      await _sendCommand('putCAS', {
+        'boxId': bId,
+        'tag': t,
+        'value': v,
+        'casField': casF,
+        'expectedValue': expV,
+        'sync': sync
+      });
   Future<List<String>> getAllBoxes() async =>
       List<String>.from(await _sendCommand('getAllBoxes', {}));
   Future<dynamic> _sendCommand(String command, Map<String, dynamic> params) {
@@ -940,11 +1356,19 @@ class Zeytin {
     required String boxId,
     required String tag,
     required Map<String, dynamic> value,
+    bool sync = false,
   }) async {
-    bool isUpdate = await existsTag(truckId: truckId, boxId: boxId, tag: tag);
+    bool isUpdate = _memoryCache.contains(_cacheKey(truckId, boxId, tag));
     final truck = await _resolveTruck(truckId: truckId);
-    await truck.write(boxId, tag, value);
+
     _memoryCache.put(_cacheKey(truckId, boxId, tag), value);
+
+    if (sync) {
+      await truck.writeSync(boxId, tag, value);
+    } else {
+      truck.writeFast(boxId, tag, value);
+    }
+
     _changeController.add({
       "truckId": truckId,
       "boxId": boxId,
@@ -952,6 +1376,31 @@ class Zeytin {
       "op": isUpdate ? "UPDATE" : "PUT",
       "value": value,
     });
+  }
+
+  Future<bool> putCAS({
+    required String truckId,
+    required String boxId,
+    required String tag,
+    required Map<String, dynamic> value,
+    required String casField,
+    required dynamic expectedValue,
+    bool sync = false,
+  }) async {
+    final truck = await _resolveTruck(truckId: truckId);
+    final success = await truck
+        .putCAS(boxId, tag, value, casField, expectedValue, sync: sync);
+    if (success) {
+      _memoryCache.put(_cacheKey(truckId, boxId, tag), value);
+      _changeController.add({
+        "truckId": truckId,
+        "boxId": boxId,
+        "tag": tag,
+        "op": "CAS_UPDATE",
+        "value": value,
+      });
+    }
+    return success;
   }
 
   Future<void> compactTruck({required String truckId}) async {
@@ -1058,10 +1507,17 @@ class Zeytin {
     required String truckId,
     required String boxId,
     required String tag,
+    bool sync = false,
   }) async {
     final truck = await _resolveTruck(truckId: truckId);
-    await truck.removeTag(boxId, tag);
     _memoryCache.remove(_cacheKey(truckId, boxId, tag));
+
+    if (sync) {
+      await truck.removeTagSync(boxId, tag);
+    } else {
+      truck.removeTagFast(boxId, tag);
+    }
+
     _changeController.add({
       "truckId": truckId,
       "boxId": boxId,
@@ -1073,10 +1529,17 @@ class Zeytin {
   Future<void> deleteBox({
     required String truckId,
     required String boxId,
+    bool sync = false,
   }) async {
     final truck = await _resolveTruck(truckId: truckId);
-    await truck.removeBox(boxId);
     _memoryCache.clear();
+
+    if (sync) {
+      await truck.removeBoxSync(boxId);
+    } else {
+      truck.removeBoxFast(boxId);
+    }
+
     _changeController.add({
       "truckId": truckId,
       "boxId": boxId,

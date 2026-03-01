@@ -1,7 +1,5 @@
 # Zeytin🫒 Local Storage
 
-
-
 <p align="center">
   <a href="https://buymeacoffee.com/jeafriday">
     <img src="https://img.buymeacoffee.com/button-api/?text=Support me&emoji=☕&slug=jeafriday&button_colour=FFDD00&font_colour=000000&font_family=Cookie&outline_colour=000000&coffee_colour=ffffff" alt="Support me" />
@@ -23,9 +21,18 @@
   </a>
 </p>
 
-
-
 Zeytin is a database solution developed with care and love for server and local solutions. ZeytinEngine is used for both the server side and the local side. ZeytinEngine is Zeytin's database engine.
+
+| Phase / Test | Description | Volume / Details | Execution Time |
+| :--- | :--- | :--- | :--- |
+| **Preparation** | Mock data generation in RAM | 60,000 items | - |
+| **Test 1.1: Batch Write** | Single operation insertion (`addBatch`) | 50,000 items | 1,731 ms |
+| **Test 1.2: Single Write** | Individual sequential insertions (`add`) | 10,000 items | 110 ms |
+| **Maintenance** | Database compaction & index repair (`compact`) | Entire DB | 4,644 ms |
+| **Test 2: Read** | Random individual data retrieval | 1,000 items (0 errors) | 3,104 ms |
+| **Test 3: Update** | Random individual data modification | 1,000 items (0 errors) | 2,878 ms |
+| **Verification** | Cold read from disk after clearing RAM | 9.23 MB file size | 1,818 ms |
+| **Test 4: Delete** | Individual deletions (blocks of 10,000) | 60,000 items | 319 ms |
 
 ## What's Inside?
 

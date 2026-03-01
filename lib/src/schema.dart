@@ -115,10 +115,41 @@ class ZeytinStorage {
     }
   }
 
+  Future<void> getAuditTrail({
+    required String targetBoxId,
+    required String targetTag,
+    required Function(List<Map<String, dynamic>> history) onSuccess,
+    Function(String e, String s)? onError,
+  }) async {
+    await _maybeTryAsync(() async {
+      final auditBoxId = "__audit_$targetBoxId";
+      final completer = Completer<List<ZeytinValue>>();
+      await getBox(
+        boxId: auditBoxId,
+        onSuccess: (boxData) => completer.complete(boxData),
+        onError: (e, s) => completer.completeError(e),
+      );
+      final boxData = await completer.future;
+      final history = <Map<String, dynamic>>[];
+
+      for (var entry in boxData) {
+        if (entry.tag.startsWith("${targetTag}_") && entry.value != null) {
+          history.add(entry.value!);
+        }
+      }
+      history.sort(
+          (a, b) => (a['timestamp'] as int).compareTo(b['timestamp'] as int));
+      onSuccess(history);
+    }, onError: onError);
+  }
+
   Future<void> add({
     required ZeytinValue data,
     bool isEncrypt = false,
     Duration? ttl,
+    bool keepHistory = false,
+    String? auditReason,
+    bool sync = false,
     Function()? onSuccess,
     Function(String e, String s)? onError,
   }) async {
@@ -126,6 +157,7 @@ class ZeytinStorage {
       () async {
         Map<String, dynamic> finalData = data.value ?? {};
         bool requiresWrapper = isEncrypt || ttl != null;
+
         if (requiresWrapper) {
           dynamic payloadToSave = data.value ?? {};
           if (isEncrypt) {
@@ -145,11 +177,55 @@ class ZeytinStorage {
                 DateTime.now().add(ttl).millisecondsSinceEpoch;
           }
         }
-        await handler!.put(
+        if (!keepHistory) {
+          await handler!.put(
+            truckId: truckID,
+            boxId: data.box,
+            tag: data.tag,
+            value: finalData,
+            sync: sync,
+          );
+          return;
+        }
+        Map<String, dynamic>? oldData;
+        final rawResult = await handler!
+            .get(truckId: truckID, boxId: data.box, tag: data.tag);
+        if (rawResult != null && rawResult["_zWrapped"] == true) {
+          if (rawResult["_isEncrypted"] == true) {
+            final encryptedBytes = rawResult["data"] as Uint8List;
+            final decryptedBytes = encrypter!.decode(encryptedBytes);
+            oldData = BinaryEncoder.decodeMap(decryptedBytes);
+          } else {
+            oldData = rawResult["data"] as Map<String, dynamic>;
+          }
+        } else {
+          oldData = rawResult;
+        }
+        final timestamp = DateTime.now().millisecondsSinceEpoch;
+        final auditLog = {
+          "timestamp": timestamp,
+          "reason": auditReason ?? "No reason provided",
+          "action": oldData == null ? "CREATE" : "UPDATE",
+          "old_value": oldData,
+          "new_value": data.value,
+        };
+        final batchEntries = <String, Map<String, dynamic>>{
+          data.tag: finalData,
+        };
+        await handler!.putBatch(
           truckId: truckID,
           boxId: data.box,
-          tag: data.tag,
-          value: finalData,
+          entries: batchEntries,
+        );
+        final auditBoxId = "__audit_${data.box}";
+        final auditTag = "${data.tag}_$timestamp";
+
+        await handler!.put(
+          truckId: truckID,
+          boxId: auditBoxId,
+          tag: auditTag,
+          value: auditLog,
+          sync: sync,
         );
       },
       onSuccess: onSuccess,
@@ -285,6 +361,61 @@ class ZeytinStorage {
     );
   }
 
+  Future<void> addCAS({
+    required ZeytinValue data,
+    required String casField,
+    required dynamic expectedValue,
+    bool isEncrypt = false,
+    Duration? ttl,
+    bool sync = false,
+    required Function(bool success) onSuccess,
+    Function(String e, String s)? onError,
+  }) async {
+    await _maybeTryAsyncWithReturn<bool>(
+      () async {
+        Map<String, dynamic> finalData = data.value ?? {};
+        bool requiresWrapper = isEncrypt || ttl != null;
+
+        if (requiresWrapper) {
+          dynamic payloadToSave = data.value ?? {};
+          if (isEncrypt) {
+            if (encrypter == null) {
+              throw Exception("ZeytinCipher has not been started.");
+            }
+            final rawBytes = BinaryEncoder.encodeMap(data.value ?? {});
+            payloadToSave = encrypter!.encode(rawBytes);
+          }
+          finalData = {
+            "_zWrapped": true,
+            "_isEncrypted": isEncrypt,
+            "data": payloadToSave,
+          };
+          if (ttl != null) {
+            finalData["_expiry"] =
+                DateTime.now().add(ttl).millisecondsSinceEpoch;
+          }
+
+          if (data.value != null && data.value!.containsKey(casField)) {
+            finalData[casField] = data.value![casField];
+          }
+        }
+        final success = await handler!.putCAS(
+          truckId: truckID,
+          boxId: data.box,
+          tag: data.tag,
+          value: finalData,
+          casField: casField,
+          expectedValue: expectedValue,
+          sync: sync,
+        );
+
+        return success;
+      },
+      onSuccess: onSuccess,
+      onError: onError,
+    );
+  }
+
   Future<void> getAllBoxes({
     required Function(List<String> result) onSuccess,
     Function(String e, String s)? onError,
@@ -414,12 +545,18 @@ class ZeytinStorage {
   Future<void> remove({
     required String boxId,
     required String tag,
+    bool sync = false,
     Function()? onSuccess,
     Function(String e, String s)? onError,
   }) async {
     await _maybeTryAsync(
       () async {
-        await handler!.delete(truckId: truckID, boxId: boxId, tag: tag);
+        await handler!.delete(
+          truckId: truckID,
+          boxId: boxId,
+          tag: tag,
+          sync: sync,
+        );
       },
       onSuccess: onSuccess,
       onError: onError,
@@ -428,12 +565,17 @@ class ZeytinStorage {
 
   Future<void> removeBox({
     required String boxId,
+    bool sync = false,
     Function()? onSuccess,
     Function(String e, String s)? onError,
   }) async {
     await _maybeTryAsync(
       () async {
-        await handler!.deleteBox(truckId: truckID, boxId: boxId);
+        await handler!.deleteBox(
+          truckId: truckID,
+          boxId: boxId,
+          sync: sync,
+        );
       },
       onSuccess: onSuccess,
       onError: onError,
