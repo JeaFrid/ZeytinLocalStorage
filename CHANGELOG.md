@@ -49,3 +49,7 @@ This update introduces a major architectural shift in the storage engine. While 
 - **CRC32 Checksum Protection:** Every data block now includes a 4-byte CRC32 integrity code. The engine verifies this checksum during every read operation to detect and prevent data corruption.
 - **Transactional Integrity (WAL):** Buffered writes are now wrapped in `TX_START` and `TX_COMMIT` blocks. This ensures that even if a crash occurs during a write, the database remains in a consistent state.
 - **Advanced Repair System:** The `_repair` logic has been completely overhauled to handle transaction logs and skip corrupted segments using CRC32 validation, ensuring maximum data recovery.
+
+## 2.0.1
+
+- New export: Engine.
