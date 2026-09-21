@@ -53,3 +53,11 @@ This update introduces a major architectural shift in the storage engine. While 
 ## 2.0.1
 
 - New export: Engine.
+
+## 2.1.1
+
+- The encryptor has been updated.
+
+## 2.1.2
+
+- Damn pointycastle is giving an error at the wrong time, so I'm making a patch. No problem.
